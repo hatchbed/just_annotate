@@ -1,0 +1,18 @@
+{
+"BasedOnStyle": "LLVM",
+"UseTab": "Never",
+"IndentWidth": 4,
+"ColumnLimit": 100,
+"AllowShortIfStatementsOnASingleLine": false,
+"TabWidth": 2,
+"FixNamespaceComments": true,
+"AlignConsecutiveMacros": true,
+"AlignConsecutiveAssignments": true,
+"AllowShortFunctionsOnASingleLine": false,
+"AlwaysBreakTemplateDeclarations": "Yes",
+"IndentCaseLabels": true,
+"ConstructorInitializerIndentWidth": 2,
+"ContinuationIndentWidth": 2,
+"PenaltyReturnTypeOnItsOwnLine": 10000,
+"PointerAlignment": "Left"
+}
