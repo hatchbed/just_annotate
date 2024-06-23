@@ -25,7 +25,7 @@ A simple video annotation tool for labeling time spans.
 
 ## File Format
 
-Data is stored in a simpled JSON structure containing the annotation classes and file annotations as ranges in seconds.
+Data is stored in a simple JSON structure containing the annotation classes and file annotations as ranges in seconds.
 The names of each file are stored, but for disambiguation, the SHA-256 hash of each file are also stored.
 
 ### Example
