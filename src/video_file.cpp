@@ -10,7 +10,6 @@
 #include <gst/gst.h>
 #include <gst/video/video.h>
 #include <gst/app/app.h>
-#include <png.h>
 #include <spdlog/spdlog.h>
 
 namespace just_annotate {
@@ -67,85 +66,6 @@ void sync_bus_call(GstBus* /* bus */, GstMessage * msg, gpointer data)
     default:
       break;
   }
-}
-
-void save_frame_to_png(GstBuffer* buffer, const char* filename)
-{
-    GstMapInfo map;
-    if (!gst_buffer_map(buffer, &map, GST_MAP_READ)) {
-        spdlog::error("Failed to map GstBuffer!");
-        return;
-    }
-
-    auto v_meta = gst_buffer_get_video_meta(buffer);
-    GstVideoInfo v_info;
-    gst_video_info_set_format(&v_info, v_meta->format, v_meta->width,
-        v_meta->height);
-    int width = v_meta->width;
-    int height = v_meta->height;
-
-    // Use libpng to write the data
-    FILE* fp = fopen(filename, "wb");
-    if (!fp) {
-        spdlog::error("Failed to open file for writing: {}", filename);
-        gst_buffer_unmap(buffer, &map);
-        return;
-    }
-
-    png_structp png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
-    if (!png_ptr) {
-        spdlog::error("Failed to create PNG write structure!");
-        fclose(fp);
-        gst_buffer_unmap(buffer, &map);
-        return;
-    }
-
-    png_infop info_ptr = png_create_info_struct(png_ptr);
-    if (!info_ptr) {
-        spdlog::error("Failed to create PNG info structure!");
-        png_destroy_write_struct(&png_ptr, nullptr);
-        fclose(fp);
-        gst_buffer_unmap(buffer, &map);
-        return;
-    }
-
-    if (setjmp(png_jmpbuf(png_ptr))) {
-        spdlog::error("Error during PNG creation!");
-        png_destroy_write_struct(&png_ptr, &info_ptr);
-        fclose(fp);
-        gst_buffer_unmap(buffer, &map);
-        return;
-    }
-
-    png_init_io(png_ptr, fp);
-
-    // Set PNG header
-    png_set_IHDR(
-        png_ptr,
-        info_ptr,
-        width,
-        height,
-        8,                // Bit depth
-        PNG_COLOR_TYPE_RGBA,
-        PNG_INTERLACE_NONE,
-        PNG_COMPRESSION_TYPE_DEFAULT,
-        PNG_FILTER_TYPE_DEFAULT
-    );
-
-    png_write_info(png_ptr, info_ptr);
-
-    // Write image data row by row
-    const guint8* data = map.data;
-    for (int y = 0; y < height; ++y) {
-        png_write_row(png_ptr, data + y * width * 4); // 4 bytes per pixel (RGBA)
-    }
-
-    // Finish writing
-    png_write_end(png_ptr, nullptr);
-    png_destroy_write_struct(&png_ptr, &info_ptr);
-    fclose(fp);
-
-    gst_buffer_unmap(buffer, &map);
 }
 
 void on_gst_buffer(GstElement* sink, gpointer data)
@@ -288,8 +208,6 @@ void VideoFile::update() {
         }
 
         auto frame = impl_->frame_buffer.back();
-        auto mem = gst_buffer_peek_memory(frame, 0);
-
         auto v_meta = gst_buffer_get_video_meta(frame);
         GstVideoInfo v_info;
         gst_video_info_set_format(&v_info, v_meta->format, v_meta->width,
