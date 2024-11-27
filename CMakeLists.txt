@@ -5,6 +5,7 @@ set(CMAKE_BUILD_TYPE RelWithDebInfo)
 
 find_package(OpenGL REQUIRED)
 find_package(PkgConfig REQUIRED)
+find_package(PNG REQUIRED)
 pkg_check_modules(GSTREAMER REQUIRED IMPORTED_TARGET gstreamer-1.0)
 pkg_check_modules(GSTREAMER_APP REQUIRED IMPORTED_TARGET gstreamer-app-1.0)
 pkg_check_modules(GSTREAMER_GL IMPORTED_TARGET REQUIRED gstreamer-gl-1.0)
@@ -57,6 +58,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     PkgConfig::LIBSSL
     PkgConfig::NLOHMANN_JSON
     PkgConfig::SPDLOG
+    PNG::PNG
     ${PROJECT_NAME}::rc)
 set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 17)
 

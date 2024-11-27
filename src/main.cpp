@@ -424,8 +424,6 @@ int main(int argc, char* argv[]) {
             ImVec2 uv_min     = ImVec2(0.0f, 0.0f);             // Top-left
             ImVec2 uv_max     = ImVec2(1.0f, 1.0f);             // Lower-right
 
-            video_file->update();
-
             if (last_image_height <= 0) {
                 last_image_height = video_file->getHeight();
             }
@@ -745,6 +743,10 @@ int main(int argc, char* argv[]) {
         displayErrorMessage("Error##ModifyAnnotationClass", "Failed to modify annotation class.", fontawesome_large);
 
         ImGui::End();
+
+        if (video_file) {
+            video_file->update();
+        }
 
         // Rendering
         ImGui::Render();

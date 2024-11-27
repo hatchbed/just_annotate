@@ -8,15 +8,16 @@ A simple video annotation tool for labeling time spans.
 
     $ sudo apt update
     $ sudo apt install build-essential cmake git libgl-dev libglib2.0-dev \
-                       libglu1-mesa-dev libgstreamer1.0-dev libspdlog \
-                       libssl-dev nlohmann-json3-dev pkg-config
+                       libglu1-mesa-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+                       libspdlog-dev libssl-dev libxcursor-dev libxi-dev libxinerama-dev \
+                       libxrandr-dev nlohmann-json3-dev pkg-config
 
 ## Build
 
     $ git clone https://github.com/hatchbed/just_annotate.git
     $ mkdir -p just_annotate/build
     $ cd just_annotate/build
-    $ cmake -DCMAKE_BUILD_TYPE=Release
+    $ cmake -DCMAKE_BUILD_TYPE=Release ..
     $ make -j4 
 
 ## Run

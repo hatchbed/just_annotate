@@ -6,15 +6,11 @@
 #include <deque>
 
 #include <GL/gl.h>
-#include <GL/glx.h>
-#include <GLFW/glfw3.h>
 #include <glib.h>
 #include <gst/gst.h>
-#include <gst/gl/gl.h>
-#include <gst/gl/gstglfuncs.h>
-#include <gst/gl/x11/gstgldisplay_x11.h>
 #include <gst/video/video.h>
 #include <gst/app/app.h>
+#include <png.h>
 #include <spdlog/spdlog.h>
 
 namespace just_annotate {
@@ -23,15 +19,9 @@ struct VideoFile::Impl {
     GstElement* pipeline = nullptr;
     GstElement* uridecodebin = nullptr;
     GstElement* videoconvert = nullptr;
-    GstElement* glupload = nullptr;
-    GstElement* glcolorconvert = nullptr;
-    GstElement* fakesink = nullptr;
-    GstGLDisplay *gldisplay = nullptr;
-    GstGLContext *glcontext = nullptr;
+    GstElement* framesink = nullptr;
     GMainLoop* loop = nullptr;
     std::deque<GstBuffer*> frame_buffer;
-    bool need_display_context = true;
-    bool need_gl_context = true;
     bool new_frame = false;
     bool wait_for_next_frame = true;
     bool end_of_stream = false;
@@ -74,38 +64,99 @@ void sync_bus_call(GstBus* /* bus */, GstMessage * msg, gpointer data)
         break;
     }
     break;
-    case GST_MESSAGE_NEED_CONTEXT:
-    {
-      VideoFile::Impl* video_file_impl = static_cast<VideoFile::Impl*>(data);
-
-      const gchar *context_type;
-
-      gst_message_parse_context_type (msg, &context_type);
-
-      if (g_strcmp0 (context_type, GST_GL_DISPLAY_CONTEXT_TYPE) == 0) {
-        GstContext *display_context = gst_context_new(GST_GL_DISPLAY_CONTEXT_TYPE, TRUE);
-        gst_context_set_gl_display (display_context, video_file_impl->gldisplay);
-        gst_element_set_context(GST_ELEMENT (msg->src), display_context);
-        video_file_impl->need_display_context = false;
-      } else if (g_strcmp0 (context_type, "gst.gl.app_context") == 0) {
-        GstContext *app_context = gst_context_new("gst.gl.app_context", TRUE);
-        GstStructure *s = gst_context_writable_structure (app_context);
-        gst_structure_set (s, "context", GST_TYPE_GL_CONTEXT, video_file_impl->glcontext, NULL);
-        gst_element_set_context (GST_ELEMENT (msg->src), app_context);
-        video_file_impl->need_gl_context = false;
-      }
-      break;
-    }
     default:
       break;
   }
 }
 
-void on_gst_buffer(GstElement* /* element */, GstBuffer* buf, GstPad* /* pad */, gpointer data)
+void save_frame_to_png(GstBuffer* buffer, const char* filename)
+{
+    GstMapInfo map;
+    if (!gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+        spdlog::error("Failed to map GstBuffer!");
+        return;
+    }
+
+    auto v_meta = gst_buffer_get_video_meta(buffer);
+    GstVideoInfo v_info;
+    gst_video_info_set_format(&v_info, v_meta->format, v_meta->width,
+        v_meta->height);
+    int width = v_meta->width;
+    int height = v_meta->height;
+
+    // Use libpng to write the data
+    FILE* fp = fopen(filename, "wb");
+    if (!fp) {
+        spdlog::error("Failed to open file for writing: {}", filename);
+        gst_buffer_unmap(buffer, &map);
+        return;
+    }
+
+    png_structp png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+    if (!png_ptr) {
+        spdlog::error("Failed to create PNG write structure!");
+        fclose(fp);
+        gst_buffer_unmap(buffer, &map);
+        return;
+    }
+
+    png_infop info_ptr = png_create_info_struct(png_ptr);
+    if (!info_ptr) {
+        spdlog::error("Failed to create PNG info structure!");
+        png_destroy_write_struct(&png_ptr, nullptr);
+        fclose(fp);
+        gst_buffer_unmap(buffer, &map);
+        return;
+    }
+
+    if (setjmp(png_jmpbuf(png_ptr))) {
+        spdlog::error("Error during PNG creation!");
+        png_destroy_write_struct(&png_ptr, &info_ptr);
+        fclose(fp);
+        gst_buffer_unmap(buffer, &map);
+        return;
+    }
+
+    png_init_io(png_ptr, fp);
+
+    // Set PNG header
+    png_set_IHDR(
+        png_ptr,
+        info_ptr,
+        width,
+        height,
+        8,                // Bit depth
+        PNG_COLOR_TYPE_RGBA,
+        PNG_INTERLACE_NONE,
+        PNG_COMPRESSION_TYPE_DEFAULT,
+        PNG_FILTER_TYPE_DEFAULT
+    );
+
+    png_write_info(png_ptr, info_ptr);
+
+    // Write image data row by row
+    const guint8* data = map.data;
+    for (int y = 0; y < height; ++y) {
+        png_write_row(png_ptr, data + y * width * 4); // 4 bytes per pixel (RGBA)
+    }
+
+    // Finish writing
+    png_write_end(png_ptr, nullptr);
+    png_destroy_write_struct(&png_ptr, &info_ptr);
+    fclose(fp);
+
+    gst_buffer_unmap(buffer, &map);
+}
+
+void on_gst_buffer(GstElement* sink, gpointer data)
 {
     VideoFile::Impl* video_file_impl = static_cast<VideoFile::Impl*>(data);
-
     if (video_file_impl->end_of_stream) {
+        return;
+    }
+
+    GstSample* sample = gst_app_sink_pull_sample(GST_APP_SINK(sink));
+    if (!sample) {
         return;
     }
 
@@ -115,8 +166,10 @@ void on_gst_buffer(GstElement* /* element */, GstBuffer* buf, GstPad* /* pad */,
         video_file_impl->frame_buffer.pop_front();
     }
 
+    GstBuffer* buffer = gst_sample_get_buffer(sample);
+
     // increment the reference count for the new frame
-    video_file_impl->frame_buffer.push_back(buf);
+    video_file_impl->frame_buffer.push_back(buffer);
     gst_buffer_ref(video_file_impl->frame_buffer.back());
 
     video_file_impl->new_frame = true;
@@ -139,10 +192,7 @@ VideoFile::~VideoFile() {
     gst_object_unref(impl_->pipeline);
     gst_object_unref(impl_->uridecodebin);
     gst_object_unref(impl_->videoconvert);
-    gst_object_unref(impl_->glupload);
-    gst_object_unref(impl_->glcolorconvert);
-    gst_object_unref(impl_->fakesink);
-    gst_object_unref(impl_->gldisplay);
+    gst_object_unref(impl_->framesink);
     for (auto frame: impl_->frame_buffer) {
         gst_buffer_unref(frame);
     }
@@ -156,38 +206,16 @@ VideoFile::Ptr VideoFile::open(const std::string& path) {
     video_file->path_ = path;
     video_file->impl_->loop = g_main_loop_new(nullptr, false);
 
-    // capture the current GL context so it can be shared with the GST GL context
-    auto glfw_window = glfwGetCurrentContext();
-    auto gl_context = glXGetCurrentContext();
-    auto gl_display = glXGetCurrentDisplay();
-
-    // the current GL context needs to be disabled first, so a dummy hidden window will be created,
-    // set to be the current GL context and then destroyed
-    glfwDefaultWindowHints();
-    glfwWindowHint(GLFW_VISIBLE, GL_FALSE);
-    auto dummy_window = glfwCreateWindow(640, 480, "", nullptr, nullptr);
-    glfwMakeContextCurrent(dummy_window);
-    glfwDestroyWindow(dummy_window);
-
-    // wrap current GL display and context in GST objects
-    video_file->impl_->gldisplay = (GstGLDisplay*)gst_gl_display_x11_new_with_display(gl_display);
-    video_file->impl_->glcontext = gst_gl_context_new_wrapped(video_file->impl_->gldisplay,
-                                                              (guintptr)gl_context,
-                                                              GST_GL_PLATFORM_GLX,
-                                                              GST_GL_API_OPENGL);
-
     std::string config = "uridecodebin name=source uri=file://";
     config += path;
-    config += " ! videoconvert name=convert ! glupload name=upload ! glcolorconvert name=colorconvert ! video/x-raw(memory:GLMemory),format=RGBA ! fakesink name=fakesink sync=1";
+    config += " ! videoconvert ! video/x-raw,format=RGBA ! appsink name=framesink sync=1";
     video_file->impl_->pipeline = gst_parse_launch(config.c_str(), nullptr);
     video_file->impl_->uridecodebin = gst_bin_get_by_name(GST_BIN(video_file->impl_->pipeline), "source");
     video_file->impl_->videoconvert = gst_bin_get_by_name(GST_BIN(video_file->impl_->pipeline), "convert");
-    video_file->impl_->glupload = gst_bin_get_by_name(GST_BIN(video_file->impl_->pipeline), "upload");
-    video_file->impl_->glcolorconvert = gst_bin_get_by_name(GST_BIN(video_file->impl_->pipeline), "colorconvert");
-    video_file->impl_->fakesink = gst_bin_get_by_name(GST_BIN(video_file->impl_->pipeline), "fakesink");
+    video_file->impl_->framesink = gst_bin_get_by_name(GST_BIN(video_file->impl_->pipeline), "framesink");
 
-    g_object_set (G_OBJECT(video_file->impl_->fakesink), "signal-handoffs", true, nullptr);
-    g_signal_connect(video_file->impl_->fakesink , "handoff", G_CALLBACK(on_gst_buffer), video_file->impl_.get());
+    g_object_set(video_file->impl_->framesink, "emit-signals", TRUE, nullptr);
+    g_signal_connect(video_file->impl_->framesink, "new-sample", G_CALLBACK(on_gst_buffer), video_file->impl_.get());
 
     GstBus* bus = gst_pipeline_get_bus(GST_PIPELINE (video_file->impl_->pipeline));
     gst_bus_add_signal_watch(bus);
@@ -197,21 +225,7 @@ VideoFile::Ptr VideoFile::open(const std::string& path) {
 
     gst_element_set_state(video_file->impl_->pipeline, GST_STATE_PLAYING);
     video_file->impl_->wait_for_next_frame = true;
-
-    bool context_restored = false;
-    for (size_t i = 0; i < 1000; i++) {
-        video_file->update();
-        if (!video_file->impl_->need_gl_context && !video_file->impl_->need_display_context) {
-            glfwMakeContextCurrent(glfw_window);
-            context_restored = true;
-            break;
-        }
-    }
-    if (!context_restored) {
-        spdlog::error("Failed to share GL context.");
-        glfwMakeContextCurrent(glfw_window);
-        return {};
-    }
+    video_file->update();
 
     return video_file;
 }
@@ -275,8 +289,6 @@ void VideoFile::update() {
 
         auto frame = impl_->frame_buffer.back();
         auto mem = gst_buffer_peek_memory(frame, 0);
-        GstGLMemory* gl_memory = (GstGLMemory*) mem;
-        gl_memory->mem.context->gl_vtable->Flush();
 
         auto v_meta = gst_buffer_get_video_meta(frame);
         GstVideoInfo v_info;
@@ -285,10 +297,31 @@ void VideoFile::update() {
         width_ = v_meta->width;
         height_ = v_meta->height;
 
-        GstVideoFrame v_frame;
-        gst_video_frame_map(&v_frame, &v_info, frame, (GstMapFlags) (GST_MAP_READ | GST_MAP_GL));
+        GstMapInfo map;
+        if (!gst_buffer_map(frame, &map, GST_MAP_READ)) {
+            spdlog::error("Failed to map GstBuffer!");
+            return;
+        }
 
-        texture_id_ = *(guint *) v_frame.data[0];
+        if (texture_id_ == 0) {
+            glGenTextures(1, &texture_id_);
+        }
+
+        glBindTexture(GL_TEXTURE_2D, texture_id_);
+
+        // Set texture parameters (filtering, wrapping)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        // Upload pixel data to the GPU
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width_, height_, 0, GL_RGBA, GL_UNSIGNED_BYTE, map.data);
+
+        gst_buffer_unmap(frame, &map);
+
+        // Unbind the texture
+        glBindTexture(GL_TEXTURE_2D, 0);
     }
 }
 
